@@ -107,3 +107,23 @@ class RpcTest < ActiveSupport::TestCase
     assert_match(/\Atcp:/, @runtime.rpc_server.description)
   end
 end
+
+class RpcUrlTest < ActiveSupport::TestCase
+  test "defaults to tmp/sockets, or a short per-app path when that is too long for a Unix socket" do
+    configure_for_tests("rpc.url" => nil)
+    assert_equal "unix://#{Rails.root.join('tmp/sockets/sim800c.sock')}", Sim800c::RPC.url
+    long_root = Pathname.new("/srv/#{'deeply/nested/' * 8}app")
+    path = Sim800c::RPC.default_socket_path(long_root)
+    assert path.start_with?("#{Dir.tmpdir}/sim800c-")
+    assert_operator path.bytesize, :<=, Sim800c::RPC::MAX_SOCKET_PATH
+    assert_equal path, Sim800c::RPC.default_socket_path(long_root.to_s) # every process of the app agrees
+    refute_equal path, Sim800c::RPC.default_socket_path("/srv/#{'deeply/nested/' * 8}other")
+  end
+
+  test "parses unix and tcp urls" do
+    assert_equal [:unix, "/run/sim800c.sock"], Sim800c::RPC.parse_url("unix:///run/sim800c.sock")
+    assert_equal [:unix, "/run/sim800c.sock"], Sim800c::RPC.parse_url("/run/sim800c.sock")
+    assert_equal [:tcp, "runtime", 7071], Sim800c::RPC.parse_url("tcp://runtime:7071")
+    assert_equal [:tcp, "::1", 7071], Sim800c::RPC.parse_url("tcp://[::1]:7071")
+  end
+end

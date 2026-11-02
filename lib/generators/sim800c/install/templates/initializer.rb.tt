@@ -1,0 +1,61 @@
+# frozen_string_literal: true
+
+# sim800c-rails: SMS, voice call and USSD gateway for the SIMCom SIM800C.
+# Every setting can also come from the environment (SIM800C_*). Durations are in seconds.
+Sim800c.configure do |config|
+  env = ->(name, default = nil) { ENV.fetch("SIM800C_#{name}", default) }
+  bool = ->(name, default) { %w[1 true yes on].include?(env.call(name, default.to_s).downcase) }
+
+  # --- Modem ------------------------------------------------------------------------------------
+  # :serial = a SIM800C on the machine running the runtime, :tcp = through sim800c-bridge,
+  # :mock = the built-in simulator (no hardware).
+  config.modem.driver = env.call("MODEM_DRIVER", Rails.env.production? ? "serial" : "mock")
+  config.modem.serial_port = env.call("SERIAL_PORT") # /dev/ttyUSB0, /dev/cu.usbserial-XXXX; `bin/rails sim800c:ports`
+  config.modem.baud_rate = Integer(env.call("BAUD_RATE", "115200")) # the SIM800C auto-bauds
+  config.modem.tcp_host = env.call("MODEM_TCP_HOST") # with driver :tcp: the machine running sim800c-bridge
+  config.modem.tcp_port = Integer(env.call("MODEM_TCP_PORT", "7070"))
+  config.modem.sim_pin = env.call("SIM_PIN") # tried once only, so a wrong PIN cannot lock the SIM
+  config.modem.command_timeout = Float(env.call("COMMAND_TIMEOUT", "10"))
+  config.modem.poll_interval = Float(env.call("POLL_INTERVAL", "15")) # status / signal polling
+  config.modem.reconnect_min = Float(env.call("RECONNECT_MIN", "2")) # reconnect backoff doubles from min to max
+  config.modem.reconnect_max = Float(env.call("RECONNECT_MAX", "60"))
+  config.modem.max_consecutive_timeouts = Integer(env.call("MAX_TIMEOUTS", "3")) # before the link is reset
+  config.modem.log_traffic = bool.call("LOG_TRAFFIC", false) # log every AT command and response (debug level)
+
+  # --- SMS --------------------------------------------------------------------------------------
+  config.sms.storage = env.call("SMS_STORAGE", "SM") # SM = SIM card, ME = modem memory
+  config.sms.delivery_reports = bool.call("SMS_DELIVERY_REPORTS", true) # sent -> delivered
+  config.sms.max_attempts = Integer(env.call("SMS_MAX_ATTEMPTS", "3")) # for transient failures
+  config.sms.retry_base = Float(env.call("SMS_RETRY_BASE", "15")) # backoff: 15 s, 30 s, 60 s...
+  config.sms.max_parts = Integer(env.call("SMS_MAX_PARTS", "6")) # 6 parts = 918 GSM characters / 402 Unicode
+  config.sms.send_timeout = Float(env.call("SMS_SEND_TIMEOUT", "60"))
+  config.sms.concat_timeout = Float(env.call("SMS_CONCAT_TIMEOUT", "600")) # wait for missing parts of a long SMS
+
+  # --- Calls and USSD ---------------------------------------------------------------------------
+  config.calls.ring_timeout = Float(env.call("CALL_RING_TIMEOUT", "60")) # hang up unanswered outgoing calls
+  config.calls.poll_interval = Float(env.call("CALL_POLL_INTERVAL", "2")) # AT+CLCC supervision during calls
+  config.calls.ussd_timeout = Float(env.call("USSD_TIMEOUT", "30")) # give up on a code the network does not answer
+
+  # --- Dashboard accounts and API ---------------------------------------------------------------
+  config.auth.admin_username = env.call("ADMIN_USERNAME", "admin")
+  config.auth.admin_password = env.call("ADMIN_PASSWORD") # first start only; skips the setup page
+  config.auth.session_ttl = Float(env.call("SESSION_TTL_HOURS", "24")) * 3600
+  config.auth.api_rate_limit_per_min = Integer(env.call("API_RATE_LIMIT_PER_MIN", "120")) # per API key
+  # config.auth.cookie_secure = true                 # default: Secure when the request is HTTPS
+  # config.auth.rate_limit_store = Rails.cache       # default: Rails.cache (shared by all web processes)
+
+  # --- Webhooks (optional) ----------------------------------------------------------------------
+  config.webhook.url = env.call("WEBHOOK_URL")
+  config.webhook.secret = env.call("WEBHOOK_SECRET") # signs bodies: X-Webhook-Signature: sha256=<hmac>
+  config.webhook.events = env.call("WEBHOOK_EVENTS")&.split(",")&.map(&:strip) # nil = all events
+
+  # --- Runtime <-> web processes ----------------------------------------------------------------
+  # Default: a Unix socket in tmp/sockets (web and runtime on the same machine / pod).
+  # Use tcp://host:port when the runtime runs in another container.
+  config.rpc.url = env.call("RPC_URL")
+  # config.rpc.token = ENV["SIM800C_RPC_TOKEN"]       # default: derived from secret_key_base
+
+  # --- Simulator (driver :mock) -----------------------------------------------------------------
+  config.mock.time_scale = Float(env.call("MOCK_TIME_SCALE", "1")) # < 1 speeds up simulated network delays
+  config.mock.sms_failure_rate = Float(env.call("MOCK_SMS_FAILURE_RATE", "0")) # 0..1 transient send failures
+end

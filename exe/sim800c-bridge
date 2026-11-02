@@ -1,0 +1,64 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Serial-to-TCP bridge for a gateway that cannot open the modem itself (it runs on another machine,
+# or in a container without access to the USB device). Run it on the host the modem is plugged into
+# and point the gateway at it with config.modem.driver = :tcp, tcp_host and tcp_port.
+
+require "optparse"
+require "sim800c/core"
+
+options = {
+  port: ENV.fetch("SIM800C_SERIAL_PORT", nil),
+  baud: Integer(ENV.fetch("SIM800C_BAUD_RATE", "115200")),
+  listen: Integer(ENV.fetch("SIM800C_BRIDGE_PORT", "7070")),
+  host: ENV.fetch("SIM800C_BRIDGE_HOST", "127.0.0.1")
+}
+
+parser = OptionParser.new do |o|
+  o.banner = "Usage: sim800c-bridge [--port DEVICE] [--baud RATE] [--listen PORT] [--host ADDRESS]"
+  o.on("-p", "--port DEVICE", "Serial device (default: $SIM800C_SERIAL_PORT)") { |v| options[:port] = v }
+  o.on("-b", "--baud RATE", Integer, "Baud rate (default: $SIM800C_BAUD_RATE or 115200)") { |v| options[:baud] = v }
+  o.on("-l", "--listen PORT", Integer, "TCP port to listen on (default: $SIM800C_BRIDGE_PORT or 7070)") do |v|
+    options[:listen] = v
+  end
+  o.on("--host ADDRESS", "Address to bind (default: $SIM800C_BRIDGE_HOST or 127.0.0.1)") { |v| options[:host] = v }
+  o.on("--list", "List serial ports and exit") do
+    ports = Sim800c::Transport::Serial.list
+    puts(ports.empty? ? "No serial ports found." : ports.map { |p| "#{p[:path]}#{" -> #{p[:target]}" if p[:target]}" })
+    exit
+  end
+  o.on("-h", "--help", "Show this help") do
+    puts o
+    puts <<~TEXT
+
+      Binding to 127.0.0.1 keeps the modem private to this machine. Anyone who can connect has full
+      control of the modem, so only bind to other addresses on a trusted network, and firewall the port.
+    TEXT
+    exit
+  end
+end
+
+begin
+  parser.parse!
+rescue OptionParser::ParseError => e
+  abort "#{e.message}\n#{parser}"
+end
+abort "No serial device given. Use --port DEVICE or set SIM800C_SERIAL_PORT (--list shows them)." if options[:port].to_s.empty?
+
+logger = Logger.new($stdout)
+logger.level = ENV.fetch("SIM800C_LOG_LEVEL", "info")
+Sim800c.logger = logger
+
+reader, writer = IO.pipe
+%w[INT TERM].each { |signal| Signal.trap(signal) { writer.write_nonblock(".", exception: false) } }
+
+reactor = Sim800c::Reactor.new(name: "sim800c-bridge", logger: logger).start
+transport = reactor.call(timeout: 5) { Sim800c::Transport::Serial.new(reactor, options[:port], options[:baud]) }
+bridge = Sim800c::Bridge.start(transport, host: options[:host], port: options[:listen], logger: logger)
+logger.info("Serial bridge for #{options[:port]} @ #{options[:baud]} baud listening on tcp://#{options[:host]}:#{bridge.port}")
+
+reader.wait_readable
+logger.info("Stopping serial bridge")
+bridge.close
+reactor.stop

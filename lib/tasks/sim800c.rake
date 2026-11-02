@@ -3,13 +3,7 @@
 namespace :sim800c do
   desc "Run the SIM800C gateway runtime (owns the modem; run exactly one)"
   task run: :environment do
-    # A foreground process should show what it does, even when Rails logs to a file.
-    unless ActiveSupport::Logger.logger_outputs_to?(Rails.logger, $stdout, $stderr)
-      stdout = ActiveSupport::Logger.new($stdout)
-      stdout.formatter = Logger::Formatter.new
-      stdout.level = Rails.logger.level
-      Sim800c.logger = ActiveSupport::BroadcastLogger.new(Rails.logger, stdout)
-    end
+    Sim800c::Runtime.log_to_stdout!
     Rails.application.eager_load!
     Sim800c::Runtime.run!
   end

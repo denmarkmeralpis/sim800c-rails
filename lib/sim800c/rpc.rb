@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "tmpdir"
+
 module Sim800c
   # Newline-delimited JSON over a Unix or TCP socket, between web processes and the runtime.
   #
@@ -13,6 +15,8 @@ module Sim800c
     PROTOCOL_VERSION = 1
     MAX_LINE = 4 * 1024 * 1024
     DEFAULT_TIMEOUT = 15
+    # Unix socket paths are limited to 104 bytes on macOS and 108 on Linux (including a NUL).
+    MAX_SOCKET_PATH = 100
 
     # The runtime cannot be reached (not running, wrong socket, refused).
     class Unavailable < Sim800c::Error; end
@@ -22,14 +26,24 @@ module Sim800c
 
     module_function
 
-    # "unix:///abs/path.sock", a bare path, or "tcp://host:port". Defaults to tmp/sockets/sim800c.sock.
+    # "unix:///abs/path.sock", a bare path, or "tcp://host:port". Defaults to tmp/sockets/sim800c.sock
+    # in the app, or to a short per-app path in the system temp directory when that one is too long.
     def url(config = Sim800c.config)
       return config.rpc.url.to_s if config.rpc.url.to_s != ""
       unless defined?(::Rails) && ::Rails.respond_to?(:root) && ::Rails.root
         raise ConfigError, "config.rpc.url is required outside a Rails app"
       end
 
-      "unix://#{::Rails.root.join('tmp/sockets/sim800c.sock')}"
+      "unix://#{default_socket_path(::Rails.root)}"
+    end
+
+    # tmp/sockets/sim800c.sock in the app, or a short path unique to the app in the system temp
+    # directory when that one is too long. The same in every process of the app.
+    def default_socket_path(root)
+      path = File.join(root.to_s, "tmp/sockets/sim800c.sock")
+      return path if path.bytesize <= MAX_SOCKET_PATH
+
+      File.join(Dir.tmpdir, "sim800c-#{OpenSSL::Digest::SHA256.hexdigest(root.to_s)[0, 16]}.sock")
     end
 
     def token(config = Sim800c.config)

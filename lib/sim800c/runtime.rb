@@ -16,6 +16,17 @@ module Sim800c
     attr_reader :config, :logger, :reactor, :bus, :events, :transport, :simulator, :manager, :sms, :calls, :ussd,
                 :webhooks, :rpc_server
 
+    # In a foreground process, also log to STDOUT when Rails logs only to a file.
+    def self.log_to_stdout!
+      return unless defined?(::Rails) && ::Rails.logger
+      return if ActiveSupport::Logger.logger_outputs_to?(::Rails.logger, $stdout, $stderr)
+
+      stdout = ActiveSupport::Logger.new($stdout)
+      stdout.formatter = ::Logger::Formatter.new
+      stdout.level = ::Rails.logger.level
+      Sim800c.logger = ActiveSupport::BroadcastLogger.new(::Rails.logger, stdout)
+    end
+
     # Runs in the foreground until INT or TERM, then stops gracefully (forced after `shutdown_timeout`).
     def self.run!(config: Sim800c.config, logger: Sim800c.logger, shutdown_timeout: 10)
       reader, writer = IO.pipe
