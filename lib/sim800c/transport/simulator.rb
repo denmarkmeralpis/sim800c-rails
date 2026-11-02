@@ -227,10 +227,11 @@ module Sim800c
         @moring = false
       end
 
-      # Runs the block after `ms` simulated milliseconds, unless the port was closed meanwhile.
+      # Runs the block after `ms` simulated milliseconds, unless the port was closed meanwhile. Like
+      # setTimeout, delays under 1 ms count as 1 ms, so output keeps the order a real modem produces.
       def after(ms, &block)
         timer = nil
-        timer = reactor.after(ms * @scale / 1000.0) do
+        timer = reactor.after([ms * @scale, 1].max / 1000.0) do
           @timers.delete(timer)
           block.call if @opened
         end
