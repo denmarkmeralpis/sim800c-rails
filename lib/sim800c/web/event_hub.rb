@@ -26,6 +26,7 @@ module Sim800c
       HEARTBEAT = 25
       MAX_PENDING = 1024 * 1024
       MAX_QUEUED = 2000
+      MAX_BACKOFF = 2
 
       SocketClient = Struct.new(:io, :scopes, :pending)
       QueueClient = Struct.new(:queue, :scopes)
@@ -45,6 +46,16 @@ module Sim800c
 
         # Formats one SSE frame.
         def frame(name, data) = "event: #{name}\ndata: #{JSON.generate(data)}\n\n"
+
+        # Closes every stream and stops the hub's threads (tests, shutdown).
+        def reset!
+          hub = @instance_lock.synchronize do
+            current = @instance if @instance_pid == Process.pid
+            @instance = nil
+            current
+          end
+          hub&.shutdown
+        end
       end
 
       def initialize
@@ -54,10 +65,23 @@ module Sim800c
         @hub = nil
         @upstream = nil
         @rpc = nil
+        # Whether the runtime's stream was up the last time we looked (nil: not known yet).
+        @online = nil
         @next_heartbeat = Reactor.now + HEARTBEAT
       end
 
       def size = @lock.synchronize { @clients.size }
+
+      def shutdown
+        clients = @lock.synchronize { @clients.slice!(0..) }
+        clients.each { |c| close_client(c) }
+        @events << :stop
+        @rpc&.unsubscribe
+        [@hub, @upstream].compact.each do |thread|
+          thread.join(1) || thread.kill
+        end
+        nil
+      end
 
       # Takes over a hijacked socket. `prelude` (HTTP head, retry and hello frames) is sent first.
       def add_socket(io, scopes, prelude)
@@ -96,25 +120,28 @@ module Sim800c
       def no_clients? = @lock.synchronize { @clients.empty? }
 
       # Keeps one subscription to the runtime while there are clients; reconnects with backoff.
+      # Clients are told (with an offline modem status) whenever the runtime stops being reachable.
       def upstream_loop
-        backoff = 0.5
+        backoff = 0.25
         until no_clients?
-          connected = false
           begin
             @rpc = Gateway.client
             @rpc.subscribe do |name, data|
-              connected = true
-              backoff = 0.5
+              @online = true
+              backoff = 0.25
               @events << [name, data]
             end
           rescue StandardError => e
             Sim800c.logger.debug("[sim800c] Event stream from the runtime unavailable: #{e.message}")
           end
-          @events << :offline if connected
+          unless @online == false
+            @online = false
+            @events << :offline
+          end
           break if no_clients?
 
           sleep backoff
-          backoff = [backoff * 2, 5].min
+          backoff = [backoff * 2, MAX_BACKOFF].min
         end
       ensure
         @rpc = nil
@@ -127,6 +154,7 @@ module Sim800c
           wait = pending ? 0.05 : [[@next_heartbeat - Reactor.now, 0].max, 1].min
           item = @events.pop(timeout: wait)
           case item
+          when :stop then return
           when Array then broadcast(clients, item[0], item[1])
           when :offline then broadcast(clients, "modem.status", Gateway.offline_status(Gateway::NOT_RUNNING))
           end
@@ -204,8 +232,10 @@ module Sim800c
 
       def drop(client)
         removed = @lock.synchronize { @clients.delete(client) }
-        return unless removed
+        close_client(client) if removed
+      end
 
+      def close_client(client)
         if client.is_a?(QueueClient)
           client.queue.close
         else

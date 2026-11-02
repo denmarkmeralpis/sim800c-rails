@@ -88,5 +88,8 @@ class ActiveSupport::TestCase
   self.use_transactional_tests = false
 
   setup { truncate_tables }
-  teardown { stop_runtime }
+  teardown do
+    Sim800c::Web::EventHub.reset!
+    stop_runtime
+  end
 end

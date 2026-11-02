@@ -155,6 +155,16 @@ module Sim800c
           nil
         end
         write_line(socket, { ok: true })
+        # Notice right away when the client goes away (it never sends anything after subscribing).
+        watcher = Thread.new do
+          Thread.current.report_on_exception = false
+          socket.timeout = nil
+          socket.read
+        rescue IOError, SystemCallError
+          nil
+        ensure
+          queue.close
+        end
         until overflow
           item = queue.pop(timeout: HEARTBEAT)
           break if item.nil? && queue.closed?
@@ -165,6 +175,7 @@ module Sim800c
       ensure
         unsubscribe&.call
         queue&.close
+        watcher&.kill
       end
 
       def error_payload(error) = { ok: false, error: error.to_h }
