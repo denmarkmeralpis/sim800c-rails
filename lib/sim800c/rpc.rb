@@ -37,13 +37,34 @@ module Sim800c
       "unix://#{default_socket_path(::Rails.root)}"
     end
 
-    # tmp/sockets/sim800c.sock in the app, or a short path unique to the app in the system temp
-    # directory when that one is too long. The same in every process of the app.
+    # tmp/sockets/sim800c.sock in the app, or a short path unique to the app in a private directory
+    # of this user under the system temp directory when that one is too long. The same in every
+    # process of the app.
     def default_socket_path(root)
       path = File.join(root.to_s, "tmp/sockets/sim800c.sock")
       return path if path.bytesize <= MAX_SOCKET_PATH
 
-      File.join(Dir.tmpdir, "sim800c-#{OpenSSL::Digest::SHA256.hexdigest(root.to_s)[0, 16]}.sock")
+      File.join(private_dir, "#{OpenSSL::Digest::SHA256.hexdigest(root.to_s)[0, 16]}.sock")
+    end
+
+    def private_dir = File.join(Dir.tmpdir, "sim800c-#{Process.euid}")
+
+    # For a socket in the private temp directory: creates the directory (0700) and makes sure nobody
+    # else owns or can write to it, so another local user cannot squat on the path and collect tokens.
+    def secure_socket_dir!(path)
+      dir = File.dirname(path)
+      return unless dir == private_dir
+
+      begin
+        Dir.mkdir(dir, 0o700)
+      rescue Errno::EEXIST
+        nil
+      end
+      stat = File.lstat(dir)
+      return if stat.directory? && stat.uid == Process.euid && (stat.mode & 0o077).zero?
+
+      raise ConfigError, "Refusing to use #{dir} for the RPC socket: it must be a directory owned by this user " \
+                         "with mode 0700. Set config.rpc.url (SIM800C_RPC_URL) to another path."
     end
 
     def token(config = Sim800c.config)
@@ -67,14 +88,19 @@ module Sim800c
       [:unix, path]
     end
 
-    # Seconds the runtime may spend on an operation (the client waits a little longer).
+    # Seconds the runtime may spend on an operation. Modem commands run one at a time, so besides
+    # its own timeout an operation may wait for the command in progress (up to an SMS submission's
+    # send timeout); call control and USSD jump the rest of the queue.
     def timeout_for(op, args = {}, config = Sim800c.config)
+      in_flight = config.sms.send_timeout + config.modem.command_timeout
       case op
-      when "ussd.send", "ussd.reply" then config.calls.ussd_timeout + 30
-      when "calls.dial" then 45
-      when "calls.hangup", "calls.answer", "calls.reject", "calls.dtmf", "modem.restart" then 30
-      when "modem.refresh" then 90
-      when "modem.at" then (args["timeout_ms"] || args[:timeout_ms] || 10_000).to_f / 1000 + 5
+      when "ussd.send", "ussd.reply" then config.calls.ussd_timeout + 20 + in_flight
+      when "calls.dial" then 30 + in_flight
+      when "calls.hangup", "calls.answer", "calls.reject", "ussd.cancel", "modem.restart" then 20 + in_flight
+      when "calls.dtmf" then 25 + in_flight
+      when "modem.refresh" then 90 + in_flight
+      # The console's commands queue behind everything else.
+      when "modem.at" then ((args["timeout_ms"] || args[:timeout_ms] || 10_000).to_f / 1000) + 120 + in_flight
       else DEFAULT_TIMEOUT
       end
     end

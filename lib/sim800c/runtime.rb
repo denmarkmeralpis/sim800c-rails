@@ -35,6 +35,7 @@ module Sim800c
           writer.write_nonblock(signal[0], exception: false)
         end
       end
+      watch_parent(writer)
       runtime = new(config: config, logger: logger).start
       logger.info("[sim800c] Runtime started (#{config.modem.driver} driver on #{config.modem.port_label}, " \
                   "RPC #{runtime.rpc_server&.description})")
@@ -47,6 +48,18 @@ module Sim800c
       end
       runtime.stop(timeout: shutdown_timeout)
       logger.info("[sim800c] Stopped")
+    end
+
+    # Started by the Puma plugin: stop when Puma goes away.
+    def self.watch_parent(stop_writer)
+      parent = ENV["SIM800C_PARENT_PID"].to_i
+      return if parent <= 1
+
+      Thread.new do
+        Thread.current.name = "sim800c-parent-watch"
+        sleep 2 while Process.ppid == parent
+        stop_writer.write_nonblock("P", exception: false)
+      end
     end
 
     # transport: optional ->(reactor) { Transport } replacing the configured one (tests).

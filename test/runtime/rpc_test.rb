@@ -43,14 +43,15 @@ class RpcTest < ActiveSupport::TestCase
     assert_nil Sim800c::Gateway.notify(kick: true)
   end
 
-  test "streams events, starting with the current modem status" do
+  test "streams events, starting with a snapshot of the modem and the call" do
     start_runtime
     client = Sim800c::Gateway.client
     events = Queue.new
     thread = Thread.new { client.subscribe { |name, data| events << [name, data] } rescue nil } # rubocop:disable Style/RescueModifier
     name, data = events.pop(timeout: 2)
-    assert_equal "modem.status", name
-    assert_equal "ready", data["connection"]
+    assert_equal "snapshot", name
+    assert_equal "ready", data.dig("modem", "connection")
+    assert_nil data["call"]
     on_runtime { simulator.inject_sms("+639175558888", "streamed") }
     received = wait_for(3, "sms.received") do
       item = events.pop(timeout: 0.1)
@@ -108,16 +109,50 @@ class RpcTest < ActiveSupport::TestCase
   end
 end
 
+class RpcStopTest < ActiveSupport::TestCase
+  test "answers clients still waiting in the listen queue when stopping" do
+    configure_for_tests
+    server = Sim800c::RPC::Server.new(url: Sim800c::RPC.url, token: "t", handler: nil).start
+    # Stop the acceptor the way #stop does, so the next client stays queued, then stop.
+    server.instance_variable_set(:@stopping, true)
+    server.instance_variable_get(:@wake_writer).write(".")
+    server.instance_variable_get(:@accept_thread).join(2)
+    client = UNIXSocket.new(Sim800c::RPC.url.delete_prefix("unix://"))
+    client.write("{}\n")
+    server.stop
+    client.timeout = 2
+    reply = JSON.parse(client.gets)
+    assert_equal [503, "modem_unavailable"], [reply.dig("error", "status"), reply.dig("error", "code")]
+  ensure
+    client&.close
+  end
+end
+
 class RpcUrlTest < ActiveSupport::TestCase
   test "defaults to tmp/sockets, or a short per-app path when that is too long for a Unix socket" do
     configure_for_tests("rpc.url" => nil)
     assert_equal "unix://#{Rails.root.join('tmp/sockets/sim800c.sock')}", Sim800c::RPC.url
     long_root = Pathname.new("/srv/#{'deeply/nested/' * 8}app")
     path = Sim800c::RPC.default_socket_path(long_root)
-    assert path.start_with?("#{Dir.tmpdir}/sim800c-")
+    assert path.start_with?("#{Dir.tmpdir}/sim800c-#{Process.euid}/")
     assert_operator path.bytesize, :<=, Sim800c::RPC::MAX_SOCKET_PATH
     assert_equal path, Sim800c::RPC.default_socket_path(long_root.to_s) # every process of the app agrees
     refute_equal path, Sim800c::RPC.default_socket_path("/srv/#{'deeply/nested/' * 8}other")
+  end
+
+  test "keeps the fallback socket in a private directory" do
+    path = Sim800c::RPC.default_socket_path("/srv/#{'deeply/nested/' * 8}app")
+    dir = File.dirname(path)
+    FileUtils.rm_rf(dir)
+    Sim800c::RPC.secure_socket_dir!(path)
+    assert_equal "700", format("%o", File.stat(dir).mode & 0o777)
+    File.chmod(0o755, dir)
+    error = assert_raises(Sim800c::ConfigError) { Sim800c::RPC.secure_socket_dir!(path) }
+    assert_match(/mode 0700/, error.message)
+    client = Sim800c::RPC::Client.new(url: "unix://#{path}", token: "t")
+    assert_raises(Sim800c::RPC::Unavailable) { client.request("health") } # never sends the token there
+  ensure
+    FileUtils.rm_rf(dir) if dir
   end
 
   test "parses unix and tcp urls" do

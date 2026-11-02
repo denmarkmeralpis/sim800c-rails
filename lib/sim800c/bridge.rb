@@ -81,6 +81,7 @@ module Sim800c
       @stopped = false
       @reopen_timer = nil
       @last_open_error = nil
+      @wake_reader, @wake_writer = IO.pipe
     end
 
     # Listens, then tries to open the serial port once. Call from outside the reactor (or a task).
@@ -106,8 +107,16 @@ module Sim800c
           nil
         end
       end
-      @server&.close
+      # The acceptor exits on its own before the listener is closed (see RPC::Server#stop).
+      @wake_writer.write_nonblock(".", exception: false)
       @accept_thread&.join(2)
+      if @server
+        while (socket = @server.accept_nonblock(exception: false)).is_a?(BasicSocket)
+          socket.close
+        end
+        @server.close
+      end
+      [@wake_reader, @wake_writer].each(&:close)
       nil
     end
 
@@ -142,8 +151,11 @@ module Sim800c
 
     def accept_loop
       loop do
-        socket = @server.accept
-        @reactor.post { on_client(socket) }
+        IO.select([@server, @wake_reader])
+        break if @stopped
+
+        socket = @server.accept_nonblock(exception: false)
+        @reactor.post { on_client(socket) } if socket.is_a?(BasicSocket)
       rescue IOError, Errno::EBADF
         break
       rescue SystemCallError => e

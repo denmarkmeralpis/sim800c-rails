@@ -31,7 +31,7 @@ module Sim800c
       def ensure_admin!(username, password)
         return false if password.to_s.empty? || !needs_setup?
 
-        create_account!(username, password, "admin")
+        create_first_admin!(username, password)
         true
       rescue AppError => e
         raise unless e.code == "conflict"
@@ -41,10 +41,21 @@ module Sim800c
 
       # First-time setup from the dashboard: creates the admin, only while no account exists.
       def setup_admin!(username, password)
+        create_first_admin!(username, password)
+      end
+
+      # Two processes creating the first admin at once would both see an empty table (READ COMMITTED).
+      # Inserting the same marker row first makes the second wait for the first to commit; by then the
+      # admin exists. The marker never outlives the transaction.
+      def create_first_admin!(username, password)
         transaction do
+          marker = IdempotencyKey.create!(owner: "system", idempotency_key: "first-admin", request_hash: "-",
+                                          sms_ids: [], created_at: Time.current)
           raise AppError.conflict("Setup has already been completed. Sign in instead.") unless needs_setup?
 
-          create_account!(username, password, "admin")
+          user = create_account!(username, password, "admin")
+          marker.delete
+          user
         end
       end
 
@@ -55,8 +66,11 @@ module Sim800c
         user if user && ok
       end
 
+      # Call inside a transaction: the admin rows stay locked until it ends, so two admins removing
+      # each other at the same time cannot leave none.
       def assert_not_last_admin!
-        raise AppError.bad_request("At least one admin account must remain") if where(role: "admin").count <= 1
+        admins = where(role: "admin").lock.pluck(:id)
+        raise AppError.bad_request("At least one admin account must remain") if admins.size <= 1
       end
     end
 
@@ -72,9 +86,11 @@ module Sim800c
         raise AppError.bad_request("You cannot change your own role") if id == acting_user_id
         raise AppError.bad_request("Invalid role: #{role}") unless Auth::ROLES.include?(role)
 
-        self.class.assert_not_last_admin! if self.role == "admin"
-        update!(role: role)
-        sessions.delete_all
+        self.class.transaction do
+          self.class.assert_not_last_admin! if self.role == "admin"
+          update!(role: role)
+          sessions.delete_all
+        end
       end
       unless password.nil?
         Auth.validate_password!(password)
@@ -87,8 +103,8 @@ module Sim800c
     def destroy_account!(acting_user_id)
       raise AppError.bad_request("You cannot delete your own account") if id == acting_user_id
 
-      self.class.assert_not_last_admin! if role == "admin"
       transaction do
+        self.class.assert_not_last_admin! if role == "admin"
         # User ids can be reused, so a new user must not inherit this one's Idempotency-Keys.
         IdempotencyKey.where(owner: "user:#{id}").delete_all
         destroy!

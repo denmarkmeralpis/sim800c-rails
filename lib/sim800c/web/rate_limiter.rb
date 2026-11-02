@@ -34,7 +34,10 @@ module Sim800c
 
       def exceeded?(key)
         cache_key, = window(key)
-        self.class.store.read(cache_key).to_i >= limit
+        store = self.class.store
+        # Counters written by #increment are raw values in Redis and Memcached: a plain #read misses them.
+        count = store.respond_to?(:read_counter) ? store.read_counter(cache_key) : store.read(cache_key, raw: true)
+        count.to_i >= limit
       end
 
       # RateLimit headers (IETF draft 8), like express-rate-limit's standardHeaders: "draft-8".

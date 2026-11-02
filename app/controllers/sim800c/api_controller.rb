@@ -93,6 +93,12 @@ module Sim800c
       nil
     end
 
+    # Logs an entry and has the runtime stream it to dashboards (log.entry).
+    def log_and_notify(level, category, message, data = nil)
+      id = log_event(level, category, message, data)
+      Gateway.notify(log: [id]) if id
+    end
+
     # Creates the admin from config.auth.admin_password the first time it is needed in this process.
     def ensure_configured_admin
       ApiController.ensure_configured_admin

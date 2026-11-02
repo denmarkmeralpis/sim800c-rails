@@ -23,6 +23,7 @@ module Sim800c
         @connections = Set.new
         @lock = Mutex.new
         @stopping = false
+        @wake_reader, @wake_writer = IO.pipe
       end
 
       def description
@@ -49,20 +50,39 @@ module Sim800c
         self
       end
 
+      # Stops accepting, answers clients still waiting in the listen queue with a 503, and closes every
+      # connection. The listener is closed by this thread only after the acceptor has exited: closing
+      # it under a thread blocked in accept(2) can strand a queued client with no answer at all.
       def stop
         @stopping = true
-        @server&.close
+        @wake_writer.write_nonblock(".", exception: false)
         @accept_thread&.join(2)
+        begin
+          File.unlink(@path) if @path && File.socket?(@path) # no new clients from here on
+        rescue SystemCallError
+          nil
+        end
+        if @server
+          stopping = AppError.modem_unavailable("Gateway runtime is shutting down")
+          while (socket = @server.accept_nonblock(exception: false)).is_a?(BasicSocket)
+            reject(socket, stopping)
+          end
+          @server.close
+        end
         sockets = @lock.synchronize { @connections.to_a }
         sockets.each { |s| close_quietly(s) }
-        File.unlink(@path) if @path && File.socket?(@path)
-      rescue SystemCallError
         nil
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        close_quietly(@wake_reader)
+        close_quietly(@wake_writer)
       end
 
       private
 
       def listen_unix(path)
+        RPC.secure_socket_dir!(path)
         FileUtils.mkdir_p(File.dirname(path))
         if File.exist?(path)
           raise Error, "Another sim800c runtime is listening on #{path}" if socket_alive?(path)
@@ -85,10 +105,14 @@ module Sim800c
 
       def accept_loop
         loop do
-          socket = @server.accept
+          IO.select([@server, @wake_reader])
+          break if @stopping
+
+          socket = @server.accept_nonblock(exception: false)
+          next unless socket.is_a?(BasicSocket)
+
           if @lock.synchronize { @connections.size } >= MAX_CONNECTIONS
-            write_line(socket, error_payload(AppError.new(503, "busy", "Too many RPC connections")))
-            close_quietly(socket)
+            reject(socket, AppError.new(503, "busy", "Too many RPC connections"))
             next
           end
           @lock.synchronize { @connections << socket }
@@ -179,6 +203,14 @@ module Sim800c
       end
 
       def error_payload(error) = { ok: false, error: error.to_h }
+
+      def reject(socket, error)
+        write_line(socket, error_payload(error))
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        close_quietly(socket)
+      end
 
       def write_line(socket, payload)
         socket.write("#{JSON.generate(payload)}\n")

@@ -4,14 +4,16 @@ require "puma/plugin"
 
 # Runs the sim800c runtime next to Puma: add `plugin :sim800c` to config/puma.rb.
 #
-# After Puma boots, the runtime is forked into its own process (so it holds the serial port once,
-# however many Puma workers there are), restarted with backoff if it exits unexpectedly, and stopped
-# with Puma. It exits by itself if Puma goes away.
+# After Puma boots, `bin/rails sim800c:run` is started as a separate process (so the serial port is
+# held once, however many Puma workers there are, and none of Puma's sockets are inherited), restarted
+# with backoff if it exits unexpectedly, and stopped with Puma. It also exits by itself if Puma goes
+# away. A phased restart does not restart it; restart Puma (or the runtime) to load new code into it.
 Puma::Plugin.create do
   def start(launcher)
     @log_writer = launcher.log_writer
-    @puma_pid = $$
+    @directory = launcher.options[:directory] || Dir.pwd
     @runtime_pid = nil
+    @starting = false
     @stopping = false
     @lock = Mutex.new
 
@@ -25,28 +27,32 @@ Puma::Plugin.create do
 
   private
 
-  def start_runtime
+  def command
+    rails = File.join(@directory, "bin/rails")
+    File.exist?(rails) ? [Gem.ruby, rails, "sim800c:run"] : [Gem.ruby, "-S", "rails", "sim800c:run"]
+  end
+
+  # Puma (re)booted: start the runtime. The supervisor passes `restart: true` and never revives a
+  # runtime that is being stopped.
+  def start_runtime(restart: false)
     @lock.synchronize do
+      return if restart && @stopping
+
       @stopping = false
       return if @runtime_pid || @starting
 
       @starting = true
     end
-    pid = fork do
-      Process.setproctitle("sim800c runtime (puma #{@puma_pid})")
-      Thread.new { exit_when_puma_is_gone }
-      # In cluster mode without preload_app!, Puma's master has not loaded the app.
-      require File.expand_path("config/environment", Dir.pwd) unless defined?(Rails) && Rails.application&.initialized?
-      Sim800c::Runtime.log_to_stdout!
-      Rails.application.eager_load!
-      Sim800c::Runtime.run!
-    end
+    pid = Process.spawn({ "SIM800C_PARENT_PID" => Process.pid.to_s }, *command, chdir: @directory)
     @lock.synchronize do
       @runtime_pid = pid
       @starting = false
       @started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
     log "* sim800c runtime started (pid #{pid})"
+  rescue SystemCallError => e
+    @lock.synchronize { @starting = false }
+    log "! Could not start the sim800c runtime: #{e.message}"
   end
 
   def stop_runtime
@@ -73,7 +79,7 @@ Puma::Plugin.create do
     nil
   end
 
-  # Restarts a runtime that exited on its own (a crash), backing off up to 30 s.
+  # Restarts a runtime that exited on its own, backing off up to 30 s.
   def supervise
     backoff = 1
     loop do
@@ -96,17 +102,7 @@ Puma::Plugin.create do
       log "! sim800c runtime exited (#{status&.exitstatus || 'signal'}); restarting in #{backoff}s"
       sleep backoff
       backoff = [backoff * 2, 30].min
-      start_runtime unless @stopping
-    end
-  end
-
-  def exit_when_puma_is_gone
-    loop do
-      sleep 2
-      next if Process.ppid == @puma_pid
-
-      Process.kill(:TERM, Process.pid)
-      break
+      start_runtime(restart: true)
     end
   end
 

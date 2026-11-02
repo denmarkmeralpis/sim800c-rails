@@ -17,13 +17,11 @@ module Sim800c
 
       # Writes queued frames, for servers without hijack support. Deliberately not array-like.
       class Body
-        def initialize(prelude, queue)
-          @prelude = prelude
+        def initialize(queue)
           @queue = queue
         end
 
         def each
-          yield @prelude
           while (frame = @queue.pop)
             yield frame
           end
@@ -37,21 +35,19 @@ module Sim800c
       def call(env)
         request = ActionDispatch::Request.new(env)
         auth = Authenticator.authenticate(request)
-        principal = auth.principal
-        snapshot = Gateway.snapshot
-        hello = { modem: principal.scope?("modem:read") ? snapshot["modem"] : nil,
-                  call: principal.scope?("calls:read") ? snapshot["call"] : nil }
-        prelude = "retry: 3000\n\n#{EventHub.frame('hello', hello)}"
-        scopes = principal.scopes.to_a
+        scopes = auth.principal.scopes.to_a
+        hub = EventHub.instance
+        # The hello comes from the hub's own state once it follows the runtime; until then, ask.
+        fallback = hub.warm? ? nil : Gateway.snapshot
 
         if env["rack.hijack?"] && env["rack.hijack"]
           io = env["rack.hijack"].call
           head = +"HTTP/1.1 200 OK\r\n"
           HEADERS.merge(auth.rate_limit_headers, "connection" => "close").each { |k, v| head << "#{k}: #{v}\r\n" }
-          EventHub.instance.add_socket(io, scopes, "#{head}\r\n#{prelude}")
+          hub.add_socket(io, scopes, "#{head}\r\n", fallback)
           [200, {}, []]
         else
-          [200, HEADERS.merge(auth.rate_limit_headers), Body.new(prelude, EventHub.instance.add_queue(scopes))]
+          [200, HEADERS.merge(auth.rate_limit_headers), Body.new(hub.add_queue(scopes, fallback))]
         end
       rescue AppError => e
         error_response(e, e.respond_to?(:headers) ? e.headers : {})

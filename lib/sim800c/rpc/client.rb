@@ -14,10 +14,10 @@ module Sim800c
       end
 
       # Returns the operation's result, or raises the AppError the runtime answered with,
-      # RPC::Unavailable or RPC::Timeout.
+      # RPC::Unavailable or RPC::Timeout (no answer within `timeout` seconds).
       def request(op, args = {}, timeout: RPC::DEFAULT_TIMEOUT)
         socket = connect
-        socket.timeout = timeout + 5
+        socket.timeout = timeout
         socket.write("#{JSON.generate({ v: PROTOCOL_VERSION, token: @token, op: op, args: args })}\n")
         line = socket.gets("\n", MAX_LINE)
         raise Unavailable, "the runtime closed the connection" if line.nil?
@@ -41,7 +41,7 @@ module Sim800c
       # Streams events, yielding (name, data) until the connection ends. Blocks; raises
       # RPC::Unavailable when it cannot connect or the stream breaks.
       def subscribe(heartbeat_timeout: Server::HEARTBEAT * 3)
-        socket = connect
+        socket = @subscription = connect
         socket.timeout = 10
         socket.write("#{JSON.generate({ v: PROTOCOL_VERSION, token: @token, op: 'subscribe' })}\n")
         ack = JSON.parse(socket.gets("\n", MAX_LINE) || "{}")
@@ -51,7 +51,6 @@ module Sim800c
         end
 
         socket.timeout = heartbeat_timeout
-        @subscription = socket
         while (line = socket.gets("\n", MAX_LINE))
           message = JSON.parse(line)
           next if message["ping"]
@@ -80,6 +79,11 @@ module Sim800c
 
       def connect
         if @kind == :unix
+          begin
+            RPC.secure_socket_dir!(@host)
+          rescue ConfigError => e
+            raise Unavailable, e.message
+          end
           UNIXSocket.new(@host)
         else
           Socket.tcp(@host, @port, connect_timeout: @connect_timeout)

@@ -75,7 +75,7 @@ directly and talk to the runtime over a local socket for live operations.
 Start the runtime one of two ways:
 
 ```ruby
-# config/puma.rb — Puma forks the runtime after booting and restarts it if it crashes
+# config/puma.rb — Puma starts the runtime after booting and restarts it if it crashes
 plugin :sim800c
 ```
 
@@ -363,7 +363,11 @@ exclusive lock on the serial device, so another program cannot use it at the sam
   to `tcp://0.0.0.0:7071` in the runtime and `tcp://<runtime host>:7071` in the web processes.
   Requests are authenticated with a token derived from `secret_key_base`, but are not encrypted:
   keep the port on a private network.
-- **Shutdown:** the runtime stops gracefully on `INT` / `TERM` (forced after 10 s).
+- **Shutdown:** the runtime stops gracefully on `INT` / `TERM` (forced after 10 s). Started by the
+  Puma plugin, it also stops when Puma does, or when Puma goes away.
+- **Puma plugin and phased restarts:** the plugin runs `bin/rails sim800c:run` as a separate process.
+  A phased restart (`pumactl phased-restart`) does not restart it; restart Puma, or run the runtime
+  as its own service, to load new code into it.
 - **Health:** `GET <mount>/healthz` answers 200 while the web app runs and reports the runtime and
   modem state.
 

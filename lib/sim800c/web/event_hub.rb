@@ -6,10 +6,15 @@ module Sim800c
   module Web
     # Fans the runtime's event stream out to this process's Server-Sent Events clients.
     #
-    # One upstream RPC subscription per process (opened while there are clients), one hub thread that
-    # writes frames with non-blocking writes, sends heartbeats and drops dead or hopelessly slow
-    # clients. Clients are either hijacked sockets (no server thread is held) or queues drained by a
-    # streaming response body (servers without hijack support).
+    # * One upstream RPC subscription per process, held while there are clients. The runtime starts
+    #   it with a snapshot (modem status and current call) and the hub keeps that state current from
+    #   the events, so a new client's hello is taken atomically with its registration.
+    # * One hub thread writes frames with non-blocking writes, sends heartbeats and drops dead or
+    #   hopelessly slow clients.
+    # * Clients are hijacked sockets (no server thread is held) or queues drained by a streaming
+    #   response body (servers without hijack support).
+    # * Each thread clears its own slot under the lock when it exits; #register starts what is missing
+    #   under the same lock.
     class EventHub
       # Bus events forwarded to clients, with the scope needed to receive each.
       STREAMED = {
@@ -23,6 +28,7 @@ module Sim800c
         "call.deleted" => "calls:read",
         "ussd.updated" => "calls:read"
       }.freeze
+      ACTIVE_CALL = %w[dialing ringing active].freeze
       HEARTBEAT = 25
       MAX_PENDING = 1024 * 1024
       MAX_QUEUED = 2000
@@ -44,9 +50,6 @@ module Sim800c
           end
         end
 
-        # Formats one SSE frame.
-        def frame(name, data) = "event: #{name}\ndata: #{JSON.generate(data)}\n\n"
-
         # Closes every stream and stops the hub's threads (tests, shutdown).
         def reset!
           hub = @instance_lock.synchronize do
@@ -56,6 +59,9 @@ module Sim800c
           end
           hub&.shutdown
         end
+
+        # Formats one SSE frame.
+        def frame(name, data) = "event: #{name}\ndata: #{JSON.generate(data)}\n\n"
       end
 
       def initialize
@@ -65,47 +71,62 @@ module Sim800c
         @hub = nil
         @upstream = nil
         @rpc = nil
-        # Whether the runtime's stream was up the last time we looked (nil: not known yet).
-        @online = nil
+        # {"modem" => status, "call" => call or nil} while the runtime's stream is up; nil when unknown.
+        @state = nil
+        @online = nil # whether the stream was up the last time we looked (nil: not known yet)
         @next_heartbeat = Reactor.now + HEARTBEAT
       end
 
       def size = @lock.synchronize { @clients.size }
+
+      # True while the hub knows the runtime's current state (a hello needs no RPC then).
+      def warm? = @lock.synchronize { !@state.nil? }
+
+      # Takes over a hijacked socket. `head` (HTTP status line and headers) is written first, then
+      # `retry` and the hello. `fallback` ({"modem", "call"}) is used for the hello while the hub has
+      # no state of its own yet.
+      def add_socket(io, scopes, head, fallback = nil)
+        scopes = Set.new(scopes)
+        register(scopes, fallback) { |hello| SocketClient.new(io, scopes, "#{head}#{hello}".b) }
+      end
+
+      # For servers without hijack support: returns a Thread::Queue of frames, starting with the
+      # hello, to write out (closed when the client is dropped).
+      def add_queue(scopes, fallback = nil)
+        scopes = Set.new(scopes)
+        queue = Thread::Queue.new
+        register(scopes, fallback) do |hello|
+          queue << hello
+          QueueClient.new(queue, scopes)
+        end
+        queue
+      end
 
       def shutdown
         clients = @lock.synchronize { @clients.slice!(0..) }
         clients.each { |c| close_client(c) }
         @events << :stop
         @rpc&.unsubscribe
-        [@hub, @upstream].compact.each do |thread|
-          thread.join(1) || thread.kill
-        end
+        [@hub, @upstream].compact.each { |thread| thread.join(1) || thread.kill }
         nil
-      end
-
-      # Takes over a hijacked socket. `prelude` (HTTP head, retry and hello frames) is sent first.
-      def add_socket(io, scopes, prelude)
-        register(SocketClient.new(io, Set.new(scopes), prelude.b))
-      end
-
-      # For servers without hijack: returns a Thread::Queue of frames (closed when dropped) to write out.
-      def add_queue(scopes)
-        queue = Thread::Queue.new
-        register(QueueClient.new(queue, Set.new(scopes)))
-        queue
       end
 
       private
 
-      def register(client)
+      def register(scopes, fallback = nil)
         @lock.synchronize do
-          @clients << client
+          state = @state || fallback || offline_state
+          hello = { modem: scopes.include?("modem:read") ? state["modem"] : nil,
+                    call: scopes.include?("calls:read") ? state["call"] : nil }
+          @clients << yield("retry: 3000\n\n#{self.class.frame('hello', hello)}")
           @hub = start_thread("sim800c-sse-hub") { hub_loop } unless @hub&.alive?
           @upstream = start_thread("sim800c-sse-upstream") { upstream_loop } unless @upstream&.alive?
         end
         @events << :wake
         nil
       end
+
+      def offline_state = { "modem" => Gateway.offline_status(Gateway::NOT_RUNNING), "call" => nil }
 
       def start_thread(name, &block)
         Thread.new do
@@ -123,10 +144,24 @@ module Sim800c
       # Clients are told (with an offline modem status) whenever the runtime stops being reachable.
       def upstream_loop
         backoff = 0.25
-        until no_clients?
+        loop do
+          leaving = @lock.synchronize do
+            next false unless @clients.empty?
+
+            @upstream = nil
+            @state = nil
+            @online = nil
+            true
+          end
+          break if leaving
+
+          rpc = @rpc = Gateway.client
           begin
-            @rpc = Gateway.client
-            @rpc.subscribe do |name, data|
+            rpc.subscribe do |name, data|
+              if no_clients?
+                rpc.unsubscribe # nobody left to tell; the loop exits above
+                next
+              end
               @online = true
               backoff = 0.25
               @events << [name, data]
@@ -134,17 +169,15 @@ module Sim800c
           rescue StandardError => e
             Sim800c.logger.debug("[sim800c] Event stream from the runtime unavailable: #{e.message}")
           end
+          next if no_clients?
+
           unless @online == false
             @online = false
             @events << :offline
           end
-          break if no_clients?
-
           sleep backoff
           backoff = [backoff * 2, MAX_BACKOFF].min
         end
-      ensure
-        @rpc = nil
       end
 
       def hub_loop
@@ -152,16 +185,15 @@ module Sim800c
           clients = @lock.synchronize { @clients.dup }
           pending = clients.any? { |c| c.is_a?(SocketClient) && !c.pending.empty? }
           wait = pending ? 0.05 : [[@next_heartbeat - Reactor.now, 0].max, 1].min
-          item = @events.pop(timeout: wait)
-          case item
+          case (item = @events.pop(timeout: wait))
           when :stop then return
-          when Array then broadcast(clients, item[0], item[1])
-          when :offline then broadcast(clients, "modem.status", Gateway.offline_status(Gateway::NOT_RUNNING))
+          when :offline then publish("offline", nil)
+          when Array then publish(item[0], item[1])
           end
+          clients = @lock.synchronize { @clients.dup }
           clients.each { |c| flush(c) if c.is_a?(SocketClient) }
           reap(clients)
           heartbeat(clients) if Reactor.now >= @next_heartbeat
-          next unless no_clients?
 
           @lock.synchronize do
             next unless @clients.empty?
@@ -169,6 +201,42 @@ module Sim800c
             @hub = nil
             @rpc&.unsubscribe
             return
+          end
+        end
+      end
+
+      # Updates the state and broadcasts to the clients registered at that moment, atomically with
+      # respect to #register.
+      def publish(name, data)
+        frames = []
+        clients = @lock.synchronize do
+          case name
+          when "snapshot"
+            @state = { "modem" => data["modem"], "call" => data["call"] }
+            frames << ["modem.status", data["modem"]]
+            frames << ["call.updated", data["call"]] if data["call"]
+          when "offline"
+            @state = offline_state
+            frames << ["modem.status", @state["modem"]]
+          else
+            track(name, data)
+            frames << [name, data]
+          end
+          @clients.dup
+        end
+        frames.each { |n, d| broadcast(clients, n, d) }
+      end
+
+      def track(name, data)
+        return unless @state
+
+        case name
+        when "modem.status" then @state["modem"] = data
+        when "call.updated", "call.incoming"
+          if ACTIVE_CALL.include?(data["status"])
+            @state["call"] = data
+          elsif @state["call"]&.dig("id") == data["id"]
+            @state["call"] = nil
           end
         end
       end
@@ -221,8 +289,7 @@ module Sim800c
         readable, = IO.select(by_io.keys, nil, nil, 0)
         Array(readable).each do |io|
           client = by_io[io]
-          data = client.io.read_nonblock(1024, exception: false)
-          drop(client) if data.nil?
+          drop(client) if client.io.read_nonblock(1024, exception: false).nil?
         rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
           drop(client)
         end

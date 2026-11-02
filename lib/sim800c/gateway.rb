@@ -15,12 +15,13 @@ module Sim800c
     # Runs an operation in the runtime and returns its result. Raises AppError (503 when the runtime
     # is down or does not answer).
     def request(op, args = {}, timeout: nil)
-      client.request(op, args, timeout: timeout || RPC.timeout_for(op, args))
+      # The runtime enforces the operation's deadline; wait a little longer for its answer.
+      client.request(op, args, timeout: timeout || (RPC.timeout_for(op, args) + 5))
     rescue RPC::Unavailable => e
       Sim800c.logger.debug("[sim800c] RPC #{op} failed: #{e.message}")
       raise AppError.modem_unavailable(NOT_RUNNING)
     rescue RPC::Timeout
-      raise AppError.modem_unavailable("Gateway runtime did not answer in time")
+      raise AppError.modem_unavailable("Timed out waiting for the gateway runtime; the request may still complete")
     end
 
     # Tells the runtime about changes made here so it broadcasts them (and wakes the SMS worker).

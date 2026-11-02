@@ -119,6 +119,8 @@ module Sim800c
                             .update_all(["status = 'sending', attempts = attempts + 1, updated_at = ?", Time.current])
         return if claimed.zero?
 
+        # Re-read: the message may have been cancelled and re-queued since it was selected.
+        row = SmsMessage.find(row.id)
         emit_change(row.id, false)
         initial = row.refs ? row.refs.deep_dup : { "concatRef" => next_concat_ref, "parts" => [] }
         save_refs(row.id, initial) unless row.refs
@@ -175,7 +177,7 @@ module Sim800c
       def handle_send_failure(row, error)
         message = error.message
         now = Time.current
-        attempts = row.attempts + 1
+        attempts = row.attempts
 
         # A dropped modem link is not the message's fault: requeue without spending an attempt.
         if error.is_a?(AT::CommandError) && error.kind == :disconnected

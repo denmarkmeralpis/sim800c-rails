@@ -52,15 +52,21 @@ module Sim800c
         error(e)
       end
 
-      # Registers a listener for every bus event; yields the current modem status first.
+      # Registers a listener for every bus event. Yields a "snapshot" ({modem, call}) first.
       # Returns a callable that removes the listeners.
       def subscribe(&block)
         bus = @runtime.bus
-        # Registered on the reactor, where events are emitted, so nothing can arrive before the snapshot.
-        listeners = @runtime.call(timeout: 5) do
-          registered = Runtime::EventBus::NAMES.to_h { |name| [name, bus.on(name) { |data| block.call(name, data) }] }
-          block.call("modem.status", @runtime.manager.status_json)
-          registered
+        listeners = nil
+        begin
+          # Registered on the reactor, where events are emitted, so nothing can arrive before the snapshot.
+          @runtime.call(timeout: 5) do
+            listeners = Runtime::EventBus::NAMES.to_h { |name| [name, bus.on(name) { |data| block.call(name, data) }] }
+            block.call("snapshot", { modem: @runtime.manager.status_json, call: @runtime.calls.active })
+          end
+        rescue StandardError
+          # The registration may still run after a timeout: undo it right after (jobs run in order).
+          @runtime.reactor.post { listeners&.each { |name, listener| bus.off(name, listener) } }
+          raise
         end
         -> { listeners.each { |name, listener| bus.off(name, listener) } }
       end
@@ -73,7 +79,7 @@ module Sim800c
           status = %i[timeout disconnected].include?(error.kind) ? 503 : 502
           AppError.new(status, "modem_error", error.message)
         when Sim800c::TimeoutError
-          AppError.new(503, "modem_unavailable", "The gateway runtime is busy; try again")
+          AppError.new(503, "modem_unavailable", "Timed out waiting for the modem; the request may still complete")
         else
           AppError.new(500, "internal_error", "Internal server error")
         end

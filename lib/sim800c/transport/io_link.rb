@@ -12,8 +12,14 @@ module Sim800c
       def open
         return Promise.resolved if open?
 
+        generation = @generation ||= 0
         reactor.task do
           io = reactor.await(reactor.defer { connect_io })
+          if @generation != generation || open?
+            # Closed (or opened again) while connecting: do not leak this one.
+            io.close
+            raise Error, "#{description} was closed while opening"
+          end
           attach(io)
           nil
         end
@@ -30,6 +36,7 @@ module Sim800c
       end
 
       def close
+        @generation = (@generation || 0) + 1
         io = @io
         return Promise.resolved unless io
 

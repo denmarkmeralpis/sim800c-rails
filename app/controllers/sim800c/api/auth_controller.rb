@@ -28,7 +28,7 @@ module Sim800c
         password = v.string("password", min: 8, max: 200, min_message: "Password must be at least 8 characters")
         v.validate!
         user = User.setup_admin!(username, password)
-        log_event(:info, "auth", "Admin account \"#{user.username}\" created during first-time setup", { ip: request.remote_ip })
+        log_and_notify(:info, "auth", "Admin account \"#{user.username}\" created during first-time setup", { ip: request.remote_ip })
         sign_in(username, password)
       end
 
@@ -57,7 +57,7 @@ module Sim800c
         new_password = v.string("newPassword", min: 8, max: 200, min_message: "New password must be at least 8 characters")
         v.validate!
         current_user.change_password!(current, new_password, principal.session_id)
-        log_event(:info, "auth", "User \"#{principal.name}\" changed their password")
+        log_and_notify(:info, "auth", "User \"#{principal.name}\" changed their password")
         head :no_content
       end
 
@@ -83,7 +83,7 @@ module Sim800c
         end
 
         token, session = Session.start!(user, ip: request.remote_ip, user_agent: request.user_agent)
-        log_event(:info, "auth", "User \"#{user.username}\" signed in", { ip: request.remote_ip })
+        log_and_notify(:info, "auth", "User \"#{user.username}\" signed in", { ip: request.remote_ip })
         set_session_cookie(token, Session.ttl)
         render json: {
           user: user.reload.as_api,

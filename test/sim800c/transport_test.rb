@@ -139,3 +139,26 @@ class BridgeTest < Minitest::Test
     second&.close
   end
 end
+
+class TcpTransportTest < Minitest::Test
+  def test_close_while_opening_does_not_leak_the_connection
+    server = TCPServer.new("127.0.0.1", 0)
+    reactor = Sim800c::Reactor.new.start
+    transport = reactor.call(timeout: 2) { Sim800c::Transport::Tcp.new(reactor, "127.0.0.1", server.local_address.ip_port) }
+    error = assert_raises(Sim800c::Error) do
+      reactor.call(timeout: 5) do
+        opening = transport.open
+        reactor.await(transport.close)
+        reactor.await(opening)
+      end
+    end
+    assert_match(/closed while opening/, error.message)
+    refute transport.open?
+    peer = server.accept
+    assert_equal "", peer.read # EOF: the client side was closed
+  ensure
+    peer&.close
+    server&.close
+    reactor&.stop
+  end
+end

@@ -119,9 +119,11 @@ class CreateSim800cTables < ActiveRecord::Migration[7.2]
       t.datetime :created_at, null: false
     end
 
+    # Keys are case-sensitive; MySQL's default collation is not.
+    case_sensitive = connection.adapter_name.match?(/mysql|trilogy/i) ? { collation: "utf8mb4_bin" } : {}
     create_table :sim800c_idempotency_keys do |t|
       t.string :owner, null: false, limit: 40 # "key:<api key id>" or "user:<user id>"
-      t.string :idempotency_key, null: false # the client's Idempotency-Key header
+      t.string :idempotency_key, null: false, **case_sensitive # the client's Idempotency-Key header
       t.string :request_hash, null: false, limit: 64 # sha256 of the parsed request, to spot a reused key
       t.json :sms_ids, null: false # ids of the messages the request created
       t.datetime :created_at, null: false

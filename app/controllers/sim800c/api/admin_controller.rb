@@ -18,13 +18,13 @@ module Sim800c
         scopes = v.enum_array("scopes", Auth::API_KEY_SCOPES, min_message: "Choose at least one scope")
         v.validate!
         key, api_key = ApiKey.generate!(name, scopes, principal.user_id)
-        log_event(:info, "auth", "API key \"#{api_key.name}\" created by #{principal.name}", { scopes: api_key.scopes })
+        log_and_notify(:info, "auth", "API key \"#{api_key.name}\" created by #{principal.name}", { scopes: api_key.scopes })
         render json: { data: api_key.as_api, key: key }, status: :created
       end
 
       def revoke_key
         api_key = (ApiKey.find_by(id: id_param) || raise(AppError.not_found("API key"))).revoke!
-        log_event(:info, "auth", "API key \"#{api_key.name}\" revoked by #{principal.name}")
+        log_and_notify(:info, "auth", "API key \"#{api_key.name}\" revoked by #{principal.name}")
         render json: { data: api_key.as_api }
       end
 
@@ -39,7 +39,7 @@ module Sim800c
         role = v.enum("role", Auth::ROLES, optional: false)
         v.validate!
         user = User.create_account!(username, password, role)
-        log_event(:info, "auth", "User \"#{user.username}\" (#{user.role}) created by #{principal.name}")
+        log_and_notify(:info, "auth", "User \"#{user.username}\" (#{user.role}) created by #{principal.name}")
         render json: { data: user.as_api }, status: :created
       end
 
@@ -51,14 +51,14 @@ module Sim800c
         v.issue("", "Nothing to update") if v.issues.empty? && role.nil? && password.nil?
         v.validate!
         user = find_user(id).update_account!(role: role, password: password, acting_user_id: principal.user_id)
-        log_event(:info, "auth", "User \"#{user.username}\" updated by #{principal.name}")
+        log_and_notify(:info, "auth", "User \"#{user.username}\" updated by #{principal.name}")
         render json: { data: user.as_api }
       end
 
       def destroy_user
         user = find_user(id_param)
         user.destroy_account!(principal.user_id)
-        log_event(:info, "auth", "User \"#{user.username}\" deleted by #{principal.name}")
+        log_and_notify(:info, "auth", "User \"#{user.username}\" deleted by #{principal.name}")
         head :no_content
       end
 

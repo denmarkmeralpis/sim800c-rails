@@ -13,8 +13,6 @@ module Sim800c
     config.middleware.use Web::Assets, PUBLIC_DIR,
                           cache_control: ::Rails.env.production? ? "public, max-age=31536000, immutable" : "no-cache"
 
-    rake_tasks do
-      load File.expand_path("../tasks/sim800c.rake", __dir__)
-    end
+    # lib/tasks/sim800c.rake is loaded by Rails::Engine itself (paths["lib/tasks"]).
   end
 end

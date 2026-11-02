@@ -65,3 +65,23 @@ class WebhooksTest < ActiveSupport::TestCase
     klass.const_set(:RETRY_DELAYS, original)
   end
 end
+
+class RateLimiterTest < ActiveSupport::TestCase
+  # Like Redis and Memcached: counters are raw values, invisible to a plain #read.
+  class RawCounterStore
+    def initialize = @data = {}
+    def increment(key, amount = 1, **) = (@data[key] = @data.fetch(key, 0) + amount)
+    def read(key, raw: false, **) = raw ? @data[key] : nil
+  end
+
+  test "sees counters stored raw by Redis or Memcached" do
+    Sim800c.config.auth.rate_limit_store = RawCounterStore.new
+    limiter = Sim800c::Web::RateLimiter.new("login", limit: 2, period: 900)
+    refute limiter.exceeded?("1.2.3.4")
+    2.times { limiter.hit("1.2.3.4") }
+    assert limiter.exceeded?("1.2.3.4")
+    refute limiter.exceeded?("5.6.7.8")
+  ensure
+    Sim800c.config.auth.rate_limit_store = nil
+  end
+end

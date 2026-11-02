@@ -106,6 +106,20 @@ class EventsTest < ActiveSupport::TestCase
     read_until(stream, 10) { |b| b.match?(/"connection":"ready"/) }
   end
 
+  test "does not report the runtime offline when the last stream closes and a new one opens" do
+    first = open_stream("Cookie" => @admin[:cookie])
+    read_until(first) { |b| b.include?("event: hello") }
+    wait_for(3, "hub follows the runtime") { Sim800c::Web::EventHub.instance.warm? }
+    first.close
+    wait_for(3, "hub idle") { Sim800c::Web::EventHub.instance.size.zero? && !Sim800c::Web::EventHub.instance.warm? }
+    second = open_stream("Cookie" => @admin[:cookie])
+    hello = read_until(second) { |b| b.include?("event: hello") }
+    assert_match(/"connection":"ready"/, hello)
+    on_runtime { simulator.inject_sms("+639175558888", "after reconnect") }
+    text = read_until(second) { |b| b.include?("after reconnect") }
+    refute_match(/not running/, text)
+  end
+
   test "falls back to a streaming body on servers without hijack" do
     env = Rack::MockRequest.env_for("#{MOUNT}/api/v1/events", "HTTP_COOKIE" => @admin[:cookie], "REMOTE_ADDR" => "127.0.0.1")
     status, headers, body = Rails.application.call(env)

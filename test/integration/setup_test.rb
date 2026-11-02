@@ -39,3 +39,16 @@ class SetupTest < ActiveSupport::TestCase
     assert_equal ["owner"], Sim800c::User.pluck(:username)
   end
 end
+
+class FirstAdminTest < ActiveSupport::TestCase
+  test "creates the first admin once and leaves no marker behind" do
+    configure_for_tests
+    user = Sim800c::User.setup_admin!("owner", "owner-password")
+    assert_equal "admin", user.role
+    assert_equal 0, Sim800c::IdempotencyKey.count
+    error = assert_raises(Sim800c::AppError) { Sim800c::User.setup_admin!("intruder", "intruder-password") }
+    assert_equal 409, error.status
+    refute Sim800c::User.ensure_admin!("admin", "admin-password")
+    assert_equal ["owner"], Sim800c::User.pluck(:username)
+  end
+end
