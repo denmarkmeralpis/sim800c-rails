@@ -18,7 +18,6 @@ module Dummy
     config.eager_load = false
     config.secret_key_base = "dummy-secret-key-base-for-tests-only-#{'x' * 64}"
     config.active_record.maintain_test_schema = false
-    config.logger = ActiveSupport::Logger.new(File.expand_path("../log/#{Rails.env}.log", __dir__))
     config.log_level = :warn
   end
 end
