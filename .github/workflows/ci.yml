@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-26.04]
         ruby: ["3.2", "3.3", "3.4"]
         rails: ["~> 7.2.0", "~> 8.0.0", "~> 8.1.0"]
         include:
@@ -20,7 +20,7 @@ jobs:
     env:
       RAILS_VERSION: ${{ matrix.rails }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
@@ -28,9 +28,9 @@ jobs:
       - run: bundle exec rake test
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
