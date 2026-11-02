@@ -1,0 +1,11 @@
+/.bundle/
+/pkg/
+/tmp/
+/coverage/
+*.gem
+Gemfile.lock
+/test/dummy/db/*.sqlite3*
+/test/dummy/log/
+/test/dummy/tmp/
+/test/dummy/storage/
+.DS_Store
