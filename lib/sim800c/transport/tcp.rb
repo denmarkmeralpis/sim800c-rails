@@ -29,12 +29,27 @@ module Sim800c
 
       def connect_io
         socket = Socket.tcp(host, port, connect_timeout: CONNECT_TIMEOUT)
-        tune(socket)
+        begin
+          verify_connected(socket)
+          tune(socket)
+        rescue StandardError
+          socket.close
+          raise
+        end
         socket
       rescue Errno::ETIMEDOUT, IO::TimeoutError
         raise Error, "Timed out connecting to serial bridge at #{description}"
       rescue SystemCallError, SocketError => e
         raise Error, "Cannot reach serial bridge at #{description}: #{e.message}"
+      end
+
+      # Some Socket.tcp implementations (Ruby 3.4's Happy Eyeballs) can return before a refused
+      # connection is reported; make sure it really is established.
+      def verify_connected(socket)
+        error = socket.getsockopt(Socket::SOL_SOCKET, Socket::SO_ERROR).int
+        raise SystemCallError.new("connect(2)", error) unless error.zero?
+
+        socket.remote_address # raises Errno::ENOTCONN when not connected
       end
 
       # No Nagle delay for short AT commands; keepalive probes after 10 s idle to notice a dead peer.

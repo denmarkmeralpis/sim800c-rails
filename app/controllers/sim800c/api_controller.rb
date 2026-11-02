@@ -4,8 +4,7 @@ module Sim800c
   # Base for the JSON API: authentication (API key or dashboard session + CSRF token), scopes,
   # API key rate limiting, JSON body parsing and the {"error": {code, message, details}} envelope.
   class ApiController < ActionController::API
-    SESSION_COOKIE = "sim800c_session"
-    SAFE_METHODS = %w[GET HEAD OPTIONS].freeze
+    SESSION_COOKIE = Web::Authenticator::SESSION_COOKIE
     MAX_BODY = 100 * 1024
 
     rescue_from StandardError, with: :render_internal_error
@@ -19,32 +18,10 @@ module Sim800c
     # -- authentication ------------------------------------------------------------------------------
 
     def authenticate!
-      key = api_key_from_request
-      if key
-        @principal = ApiKey.authenticate(key) or raise AppError.unauthorized("Invalid or revoked API key")
-        rate_limit_api_key!
-        return
-      end
-
-      session = Session.authenticate(request.cookies[SESSION_COOKIE])
-      raise AppError.unauthorized unless session
-
-      unless SAFE_METHODS.include?(request.request_method)
-        csrf = request.headers["X-CSRF-Token"].to_s
-        unless ActiveSupport::SecurityUtils.secure_compare(csrf, session.csrf_token)
-          raise AppError.new(403, "csrf_failed", "Missing or invalid CSRF token")
-        end
-      end
-      @principal = session.principal
-      @current_user = session.user
-    end
-
-    def api_key_from_request
-      header = request.headers["X-API-Key"].to_s.strip
-      return header unless header.empty?
-
-      m = /\ABearer\s+(.+)\z/i.match(request.headers["Authorization"].to_s)
-      m && m[1].strip
+      result = Web::Authenticator.authenticate(request)
+      result.rate_limit_headers.each { |name, value| response.set_header(name, value) }
+      @principal = result.principal
+      @current_user = result.user
     end
 
     def require_scope!(*scopes)
@@ -55,13 +32,6 @@ module Sim800c
     # Endpoints that only a signed-in dashboard user (not an API key) may call.
     def require_session!
       raise AppError.forbidden("This endpoint requires a dashboard session") unless principal&.session?
-    end
-
-    def rate_limit_api_key!
-      limiter = Web::RateLimiter.new("api", limit: Sim800c.config.auth.api_rate_limit_per_min, period: 60)
-      result = limiter.hit("key:#{principal.api_key_id}")
-      limiter.headers(result).each { |name, value| response.set_header(name, value) }
-      raise AppError.new(429, "rate_limited", "API rate limit exceeded") unless result.allowed
     end
 
     # -- session cookie ------------------------------------------------------------------------------
@@ -152,6 +122,7 @@ module Sim800c
     end
 
     def render_app_error(error)
+      error.headers.each { |name, value| response.set_header(name, value) } if error.respond_to?(:headers)
       render_error(error.status, error.code, error.message, error.details)
     end
 

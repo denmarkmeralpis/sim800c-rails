@@ -66,7 +66,7 @@ Sim800c::Engine.routes.draw do
         patch "admin/users/:id", to: "admin#update_user"
         delete "admin/users/:id", to: "admin#destroy_user"
 
-        get "events", to: "events#stream"
+        get "events", to: Sim800c::Web::EventStream
 
         get "simulator", to: "simulator#show"
         post "simulator/incoming-sms", to: "simulator#incoming_sms"
